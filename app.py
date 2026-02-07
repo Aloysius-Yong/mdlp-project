@@ -1,6 +1,6 @@
 import os
 import warnings
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import joblib
 import numpy as np
@@ -173,7 +173,6 @@ def filter_df_for_choices(df: pd.DataFrame, colmap: Dict[str, str], brand: str, 
 
     out = df.copy()
 
-    # IMPORTANT: normalize for matching (prevents Apple vs APPLE vs "Apple " issues)
     if bcol and bcol in out.columns and brand:
         out["_brand_norm"] = out[bcol].apply(norm_text)
         out = out[out["_brand_norm"] == norm_text(brand)]
@@ -212,7 +211,6 @@ def find_similar_phones(
     work[scol] = pd.to_numeric(work[scol], errors="coerce")
     work = work.dropna(subset=[rcol, scol])
 
-    # brand filter normalized
     if bcol in work.columns and brand:
         work["_brand_norm"] = work[bcol].apply(norm_text)
         work = work[work["_brand_norm"] == norm_text(brand)]
@@ -253,8 +251,144 @@ def nice_phone_name(row: pd.Series, colmap: Dict[str, str]) -> str:
     return (m or b or "Phone")
 
 
+def minmax01(s: pd.Series) -> pd.Series:
+    s = pd.to_numeric(s, errors="coerce")
+    if s.isna().all():
+        return pd.Series([0.0] * len(s), index=s.index)
+    lo = float(np.nanmin(s.values))
+    hi = float(np.nanmax(s.values))
+    if hi - lo == 0:
+        return pd.Series([0.0] * len(s), index=s.index)
+    return (s - lo) / (hi - lo)
+
+
+def compute_impute_values(df_full: pd.DataFrame, colmap: Dict[str, str]) -> Dict[str, object]:
+    """
+    Build robust imputation values so brands with 100% missing (e.g., Apple RAM missing)
+    still work in Recommendations.
+    """
+    bcol = colmap.get("brand")
+    rcol = colmap.get("ram")
+    scol = colmap.get("storage")
+
+    out = {
+        "global_ram": 4.0,
+        "global_storage": 64.0,
+        "brand_ram_med": {},
+        "brand_storage_med": {},
+    }
+
+    if df_full.empty or not bcol or bcol not in df_full.columns:
+        return out
+
+    work = df_full.copy()
+
+    if rcol and rcol in work.columns:
+        work[rcol] = pd.to_numeric(work[rcol], errors="coerce")
+        g = work[rcol].dropna()
+        if not g.empty:
+            out["global_ram"] = float(g.median())
+        # brand median
+        med = work.groupby(bcol)[rcol].median(numeric_only=True)
+        out["brand_ram_med"] = {norm_text(k): (None if pd.isna(v) else float(v)) for k, v in med.items()}
+
+    if scol and scol in work.columns:
+        work[scol] = pd.to_numeric(work[scol], errors="coerce")
+        g = work[scol].dropna()
+        if not g.empty:
+            out["global_storage"] = float(g.median())
+        med = work.groupby(bcol)[scol].median(numeric_only=True)
+        out["brand_storage_med"] = {norm_text(k): (None if pd.isna(v) else float(v)) for k, v in med.items()}
+
+    # hard fallbacks (safe defaults) if even global median is weird
+    if not np.isfinite(out["global_ram"]) or out["global_ram"] <= 0:
+        out["global_ram"] = 4.0
+    if not np.isfinite(out["global_storage"]) or out["global_storage"] <= 0:
+        out["global_storage"] = 64.0
+
+    return out
+
+
+def fill_missing_specs(
+    df_in: pd.DataFrame,
+    colmap: Dict[str, str],
+    impute: Dict[str, object],
+) -> pd.DataFrame:
+    """
+    Fill missing RAM/Storage so we can still score recommendations for brands that have missing values.
+    """
+    bcol = colmap.get("brand")
+    rcol = colmap.get("ram")
+    scol = colmap.get("storage")
+
+    out = df_in.copy()
+    if out.empty:
+        return out
+
+    # Ensure brand norm exists for mapping
+    if bcol and bcol in out.columns:
+        out["_brand_norm"] = out[bcol].apply(norm_text)
+    else:
+        out["_brand_norm"] = ""
+
+    # RAM
+    if rcol and rcol in out.columns:
+        out[rcol] = pd.to_numeric(out[rcol], errors="coerce")
+        brand_map = impute.get("brand_ram_med", {}) or {}
+        global_ram = float(impute.get("global_ram", 4.0))
+
+        # fill with brand median if exists, else global, else hard fallback
+        def _fill_ram(row):
+            v = row[rcol]
+            if pd.notna(v):
+                return float(v)
+            bn = row["_brand_norm"]
+            bm = brand_map.get(bn, None)
+            if bm is not None and np.isfinite(bm) and bm > 0:
+                return float(bm)
+            if np.isfinite(global_ram) and global_ram > 0:
+                return float(global_ram)
+            return 4.0
+
+        out[rcol] = out.apply(_fill_ram, axis=1)
+
+    # Storage
+    if scol and scol in out.columns:
+        out[scol] = pd.to_numeric(out[scol], errors="coerce")
+        brand_map = impute.get("brand_storage_med", {}) or {}
+        global_sto = float(impute.get("global_storage", 64.0))
+
+        def _fill_sto(row):
+            v = row[scol]
+            if pd.notna(v):
+                return float(v)
+            bn = row["_brand_norm"]
+            bm = brand_map.get(bn, None)
+            if bm is not None and np.isfinite(bm) and bm > 0:
+                return float(bm)
+            if np.isfinite(global_sto) and global_sto > 0:
+                return float(global_sto)
+            return 64.0
+
+        out[scol] = out.apply(_fill_sto, axis=1)
+
+    return out
+
+
 # IMPORTANT: Do NOT cache this (model object can trigger hashing errors)
-def predict_for_rows(df_subset: pd.DataFrame, colmap: Dict[str, str], model_obj) -> pd.DataFrame:
+def predict_for_rows(
+    df_subset: pd.DataFrame,
+    colmap: Dict[str, str],
+    model_obj,
+    impute: Dict[str, object],
+) -> pd.DataFrame:
+    """
+    Robust row scoring:
+    - Fill missing RAM/Storage (brand median -> global median -> hard fallback)
+    - Fill missing Color with "Unknown"
+    - Normalize unlocked values (default to "No" if missing)
+    - Never crash due to NA from the dataset
+    """
     if df_subset.empty:
         return df_subset
 
@@ -266,42 +400,36 @@ def predict_for_rows(df_subset: pd.DataFrame, colmap: Dict[str, str], model_obj)
     ucol = colmap.get("unlocked")
     pcol = colmap.get("price")
 
-    # Only REQUIRE columns truly needed for model input.
-    # If dataset has missing color/unlocked, we fill safely to avoid dropping whole brands.
-    needed = [bcol, mcol, rcol, scol]
+    # Must have these columns for model input
+    needed = [bcol, mcol, ccol, rcol, scol, ucol]
     if any(col is None for col in needed):
         return pd.DataFrame()
 
     work = df_subset.copy()
 
-    # numeric parsing
-    if rcol and rcol in work.columns:
-        work[rcol] = pd.to_numeric(work[rcol], errors="coerce")
-    if scol and scol in work.columns:
-        work[scol] = pd.to_numeric(work[scol], errors="coerce")
+    # Fill missing RAM/Storage BEFORE dropping / predicting
+    work = fill_missing_specs(work, colmap, impute)
 
-    # Fill optional columns rather than dropping (prevents brand disappearing due to NA)
-    if ccol and ccol in work.columns:
-        work[ccol] = work[ccol].fillna("Unknown").astype(str)
-    else:
-        # model expects a color col name; if missing we can't proceed
-        return pd.DataFrame()
+    # Color: fill safely
+    work[ccol] = work[ccol].fillna("Unknown").astype(str).replace({"nan": "Unknown"}).astype(str)
 
-    if ucol and ucol in work.columns:
-        work["_unlocked_norm"] = work[ucol].apply(normalize_yes_no)
-    else:
-        # if unlocked column missing, assume "Yes" (neutral default)
-        # But model input needs an unlocked column name; if missing, we can't proceed
-        return pd.DataFrame()
-
+    # Unlocked: normalize (fill missing => "No" default)
+    work[ucol] = work[ucol].fillna("No")
+    work["_unlocked_norm"] = work[ucol].apply(normalize_yes_no)
     work["_free_bin"] = (work["_unlocked_norm"].str.lower() == "yes").astype(int)
 
-    # Only drop rows missing required numeric/text fields
-    work = work.dropna(subset=[bcol, mcol, rcol, scol])
+    # Ensure required fields exist (brand/model) and numeric usable
+    work[bcol] = work[bcol].astype(str)
+    work[mcol] = work[mcol].astype(str)
+    work[rcol] = pd.to_numeric(work[rcol], errors="coerce")
+    work[scol] = pd.to_numeric(work[scol], errors="coerce")
+
+    # After fill, rcol/scol should be numeric; but guard anyway
+    work = work.dropna(subset=[bcol, mcol, rcol, scol, ccol, ucol]).copy()
     if work.empty:
         return pd.DataFrame()
 
-    # Build X in the SAME column names the model expects (using your detected names)
+    # Build X with exact detected column names
     X = pd.DataFrame(
         {
             bcol: work[bcol].astype(str),
@@ -313,14 +441,19 @@ def predict_for_rows(df_subset: pd.DataFrame, colmap: Dict[str, str], model_obj)
         }
     )
 
-    # engineered features
     X["Free_bin"] = work["_free_bin"].astype(int)
     X["RAM_x_Storage"] = (work[rcol].astype(float) * work[scol].astype(float)).astype(float)
     X["Storage_per_RAM"] = (work[scol].astype(float) / work[rcol].replace(0, np.nan).astype(float)).astype(float)
 
+    # If any engineered features still NaN, fill with safe values
+    # (some models will crash on NaN)
+    X["Storage_per_RAM"] = X["Storage_per_RAM"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    X["RAM_x_Storage"] = X["RAM_x_Storage"].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
     preds = model_obj.predict(X)
     work["_predicted_price"] = preds.astype(float)
 
+    # Value gap (if dataset price exists)
     if pcol and pcol in work.columns:
         work[pcol] = pd.to_numeric(work[pcol], errors="coerce")
         work["_value_gap"] = work["_predicted_price"] - work[pcol]
@@ -328,17 +461,6 @@ def predict_for_rows(df_subset: pd.DataFrame, colmap: Dict[str, str], model_obj)
         work["_value_gap"] = np.nan
 
     return work
-
-
-def minmax01(s: pd.Series) -> pd.Series:
-    s = pd.to_numeric(s, errors="coerce")
-    if s.isna().all():
-        return pd.Series([0.0] * len(s), index=s.index)
-    lo = float(np.nanmin(s.values))
-    hi = float(np.nanmax(s.values))
-    if hi - lo == 0:
-        return pd.Series([0.0] * len(s), index=s.index)
-    return (s - lo) / (hi - lo)
 
 
 # =========================
@@ -418,12 +540,8 @@ brands = unique_sorted(df, colmap["brand"]) or ["Apple", "Samsung", "Xiaomi", "O
 colors_all = unique_sorted(df, colmap["color"]) or ["Black", "White", "Blue", "Red", "Green"]
 all_models = unique_sorted(df, colmap["model"]) if colmap["model"] else []
 
-# build brand normalization mapping: "apple" -> "Apple " (display label that exists in CSV)
-brand_norm_to_display = {}
-for b in brands:
-    bn = norm_text(b)
-    if bn and bn not in brand_norm_to_display:
-        brand_norm_to_display[bn] = b
+# Precompute robust imputation values (fixes Apple 100% RAM missing, etc.)
+IMPUTE = compute_impute_values(df, colmap)
 
 # =========================
 # Session state
@@ -557,12 +675,7 @@ with tab_predict:
         filtered = filter_df_for_choices(df, colmap, st.session_state.brand, st.session_state.model)
 
         ram_options = unique_sorted_numeric(filtered, colmap["ram"]) or unique_sorted_numeric(df, colmap["ram"]) or [
-            2,
-            4,
-            6,
-            8,
-            12,
-            16,
+            2, 4, 6, 8, 12, 16
         ]
         ram_labels = [str(r) for r in ram_options]
         ram_index = (
@@ -575,11 +688,7 @@ with tab_predict:
         st.selectbox("RAM", ram_labels, index=ram_index, key="ram", label_visibility="collapsed")
 
         storage_options = unique_sorted_numeric(filtered, colmap["storage"]) or unique_sorted_numeric(df, colmap["storage"]) or [
-            32,
-            64,
-            128,
-            256,
-            512,
+            32, 64, 128, 256, 512
         ]
         storage_labels = [str(s) for s in storage_options]
         storage_index = (
@@ -789,12 +898,7 @@ with tab_compare:
         filtered_local = filter_df_for_choices(df, colmap, st.session_state[b_key], st.session_state[m_key])
 
         ram_opts = unique_sorted_numeric(filtered_local, colmap["ram"]) or unique_sorted_numeric(df, colmap["ram"]) or [
-            2,
-            4,
-            6,
-            8,
-            12,
-            16,
+            2, 4, 6, 8, 12, 16
         ]
         ram_labels = [str(v) for v in ram_opts]
         r_index = (
@@ -807,11 +911,7 @@ with tab_compare:
         st.selectbox("RAM", ram_labels, index=r_index, key=r_key, label_visibility="collapsed")
 
         storage_opts = unique_sorted_numeric(filtered_local, colmap["storage"]) or unique_sorted_numeric(df, colmap["storage"]) or [
-            32,
-            64,
-            128,
-            256,
-            512,
+            32, 64, 128, 256, 512
         ]
         storage_labels = [str(v) for v in storage_opts]
         s_index = (
@@ -985,7 +1085,10 @@ with tab_reco:
 
         field_label("Minimum Storage", "Filter out phones below this storage (optional).")
         st.selectbox(
-            "Minimum Storage", ["Any"] + [str(v) for v in sto_all], key="rec_min_storage", label_visibility="collapsed"
+            "Minimum Storage",
+            ["Any"] + [str(v) for v in sto_all],
+            key="rec_min_storage",
+            label_visibility="collapsed",
         )
 
     with f3:
@@ -1038,7 +1141,7 @@ with tab_reco:
                 scol = colmap["storage"]
                 ucol = colmap["unlocked"]
 
-                # Normalize brand column once (prevents Apple mismatch)
+                # Normalize brand column once
                 work["_brand_norm"] = work[bcol].apply(norm_text)
 
                 # Brand filter (normalized)
@@ -1047,7 +1150,16 @@ with tab_reco:
                 if selected_norm:
                     work = work[work["_brand_norm"].isin(selected_norm)]
 
-                # numeric filters
+                # Apply SIM filter early (before fill is fine)
+                if st.session_state.rec_sim != "Any":
+                    want_yes = unlocked_label_to_bool(st.session_state.rec_sim)
+                    want = "Yes" if want_yes else "No"
+                    work = work[work[ucol].apply(normalize_yes_no).str.lower() == want.lower()]
+
+                # IMPORTANT: fill missing RAM/Storage so brands like Apple do NOT disappear
+                work = fill_missing_specs(work, colmap, IMPUTE)
+
+                # Minimum spec filters (after fill)
                 work[rcol] = pd.to_numeric(work[rcol], errors="coerce")
                 work[scol] = pd.to_numeric(work[scol], errors="coerce")
 
@@ -1059,14 +1171,12 @@ with tab_reco:
                 if min_sto is not None and not np.isnan(min_sto):
                     work = work[work[scol] >= float(min_sto)]
 
-                # SIM filter
-                if st.session_state.rec_sim != "Any":
-                    want_yes = unlocked_label_to_bool(st.session_state.rec_sim)
-                    want = "Yes" if want_yes else "No"
-                    work = work[work[ucol].apply(normalize_yes_no).str.lower() == want.lower()]
+                # Fill optional fields safely so we don't drop huge chunks
+                work[ccol] = work[ccol].fillna("Unknown")
+                work[ucol] = work[ucol].fillna("No")
 
-                # IMPORTANT: do not drop on optional columns beyond what model needs
-                work = work.dropna(subset=[bcol, mcol, rcol, scol]).copy()
+                # Only drop if brand/model missing (true identifiers)
+                work = work.dropna(subset=[bcol, mcol]).copy()
 
                 if work.empty:
                     tips = [
@@ -1082,12 +1192,12 @@ with tab_reco:
                         work = work.sample(4000, random_state=42)
 
                     with st.spinner("Running the model to generate recommendations..."):
-                        scored = predict_for_rows(work, colmap, model)
+                        scored = predict_for_rows(work, colmap, model, IMPUTE)
 
                     if scored.empty or "_predicted_price" not in scored.columns:
                         st.error(
                             "We couldn’t generate recommendations with the current dataset/model.\n"
-                            "Tip: check that your CSV has usable RAM/Storage values and Unlocked/Free values."
+                            "Tip: ensure your dataset includes Brand/Model/Color/Unlocked and has usable Storage values."
                         )
                     else:
                         # Budget filter uses model prediction

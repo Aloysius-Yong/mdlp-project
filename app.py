@@ -1266,6 +1266,38 @@ with tab_reco:
 
                             st.write("")
                             st.markdown("### Your recommended phones")
+
+                            # --- Explain scores + show min/max ranges ---
+                            has_deal = "Deal score" in display.columns
+
+                            # Recommendation score range (always present)
+                            rec_min = float(pd.to_numeric(display["Recommendation score"], errors="coerce").min())
+                            rec_max = float(pd.to_numeric(display["Recommendation score"], errors="coerce").max())
+
+                            if has_deal:
+                                deal_series = pd.to_numeric(display["Deal score"], errors="coerce")
+                                deal_min = float(deal_series.min())
+                                deal_max = float(deal_series.max())
+
+                                st.info(
+                                    f"**What these scores mean**\n\n"
+                                    f"- **Deal score** = **Predicted price − Dataset price**.\n"
+                                    f"  - **Negative** = model thinks it’s *cheaper than expected* (better deal).\n"
+                                    f"  - **Positive** = model thinks it’s *more expensive than expected*.\n"
+                                    f"  - **Range in your results:** {deal_min:.2f} to {deal_max:.2f}\n\n"
+                                    f"- **Recommendation score** = a combined score based on the ranking options you selected "
+                                    f"(overall / cheapest / value / most storage / most RAM). Higher is better.\n"
+                                    f"  - **Range in your results:** {rec_min:.3f} to {rec_max:.3f}"
+                                )
+                            else:
+                                st.info(
+                                    f"**What this score means**\n\n"
+                                    f"- **Recommendation score** = a combined score based on the ranking options you selected "
+                                    f"(overall / cheapest / most storage / most RAM). Higher is better.\n"
+                                    f"  - **Range in your results:** {rec_min:.3f} to {rec_max:.3f}\n\n"
+                                    f"*(Deal score is hidden because your dataset does not contain an actual price column to compare against.)*"
+                                )
+
                             st.dataframe(
                                 display,
                                 use_container_width=True,

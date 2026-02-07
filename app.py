@@ -1,6 +1,6 @@
 import os
 import warnings
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import joblib
 import numpy as np
@@ -214,6 +214,11 @@ def filter_df_for_choices(df: pd.DataFrame, colmap: Dict[str, str], brand: str, 
     return out
 
 
+def field_label(title: str, desc: str):
+    # Labels styled like your screenshot: **Field:** description
+    st.markdown(f"**{title}:** {desc}")
+
+
 # =========================
 # Page setup + CSS
 # =========================
@@ -249,6 +254,9 @@ section[data-testid="stSidebar"] { display: none; }
 .card h2 { margin: 0 0 8px 0; font-size: 1.25rem; }
 .muted { color: rgba(15,23,42,0.60); font-size: 0.95rem; }
 .small { font-size: 0.9rem; color: rgba(15,23,42,0.65); }
+
+/* Make the description labels look clean */
+div[data-testid="stMarkdownContainer"] p { margin-bottom: 0.25rem; }
 
 div.stButton > button, div.stDownloadButton > button {
   border-radius: 12px !important;
@@ -307,7 +315,7 @@ if "storage" not in st.session_state:
 if "color" not in st.session_state:
     st.session_state.color = colors_all[0]
 if "unlocked" not in st.session_state:
-    st.session_state.unlocked = "Yes"
+    st.session_state.unlocked = "Yes (Any SIM)"
 if "budget" not in st.session_state:
     st.session_state.budget = 1200
 
@@ -318,16 +326,18 @@ if "last_pred" not in st.session_state:
 
 
 def on_brand_change():
-    # When brand changes, model must reset
     st.session_state.model = "(Select a model)"
     st.session_state.ram = None
     st.session_state.storage = None
 
 
 def on_model_change():
-    # When model changes, reset RAM/Storage so user must pick valid ones for that model
     st.session_state.ram = None
     st.session_state.storage = None
+
+
+def unlocked_to_bool(val: str) -> bool:
+    return str(val).lower().startswith("yes")
 
 
 # =========================
@@ -360,13 +370,15 @@ with tab_predict:
         )
         st.write("")
 
-        # Brand (reactive)
+        # Brand
+        field_label("Brand", "Smartphone brand.")
         st.selectbox(
             "Brand",
             brands,
             index=brands.index(st.session_state.brand) if st.session_state.brand in brands else 0,
             key="brand",
             on_change=on_brand_change,
+            label_visibility="collapsed",
         )
 
         # Models filtered by brand
@@ -378,12 +390,14 @@ with tab_predict:
         else:
             model_options += (all_models or [])
 
+        field_label("Model", "Smartphone model name for the selected brand.")
         st.selectbox(
             "Model",
             model_options,
             index=model_options.index(st.session_state.model) if st.session_state.model in model_options else 0,
             key="model",
             on_change=on_model_change,
+            label_visibility="collapsed",
         )
 
         # Filter for dependent dropdowns (RAM/Storage/Color)
@@ -393,58 +407,76 @@ with tab_predict:
         ram_options = unique_sorted_numeric(filtered, colmap["ram"])
         if not ram_options:
             ram_options = unique_sorted_numeric(df, colmap["ram"]) or [2, 4, 6, 8, 12, 16]
-
-        # Convert to strings for nicer dropdown, but keep mapping back to int
         ram_labels = [str(r) for r in ram_options]
         if st.session_state.ram is None or str(st.session_state.ram) not in ram_labels:
             ram_index = 0
         else:
             ram_index = ram_labels.index(str(st.session_state.ram))
 
+        field_label("RAM (Random Access Memory)", "Amount of memory available for multitasking (in GB).")
         st.selectbox(
             "RAM (GB)",
             ram_labels,
             index=ram_index,
             key="ram",
+            label_visibility="collapsed",
         )
 
         # Storage dropdown ONLY from dataset (filtered)
         storage_options = unique_sorted_numeric(filtered, colmap["storage"])
         if not storage_options:
             storage_options = unique_sorted_numeric(df, colmap["storage"]) or [32, 64, 128, 256, 512]
-
         storage_labels = [str(s) for s in storage_options]
         if st.session_state.storage is None or str(st.session_state.storage) not in storage_labels:
             storage_index = 0
         else:
             storage_index = storage_labels.index(str(st.session_state.storage))
 
+        field_label("Storage", "Phone storage capacity (in GB).")
         st.selectbox(
             "Storage (GB)",
             storage_labels,
             index=storage_index,
             key="storage",
+            label_visibility="collapsed",
         )
 
         # Color dropdown ONLY from dataset (filtered)
         color_options = unique_sorted(filtered, colmap["color"])
         if not color_options:
             color_options = colors_all
-
         if st.session_state.color not in color_options:
             st.session_state.color = color_options[0]
 
+        field_label("Color", "Color of the smartphone.")
         st.selectbox(
             "Color",
             color_options,
             index=color_options.index(st.session_state.color),
             key="color",
+            label_visibility="collapsed",
         )
 
-        st.radio("Unlocked?", ["Yes", "No"], horizontal=True, key="unlocked")
+        # Unlocked - user-friendly wording
+        field_label("SIM Status", "Whether the phone can use any SIM (unlocked) or is locked to a telco.")
+        st.radio(
+            "Works with any SIM card?",
+            ["Yes (Any SIM)", "No (Locked to a telco)"],
+            horizontal=True,
+            key="unlocked",
+            label_visibility="collapsed",
+        )
 
         st.write("")
-        st.slider("Optional: your budget", min_value=0, max_value=5000, step=50, key="budget")
+        field_label("Budget", "Optional: set your max budget to see if the estimate fits.")
+        st.slider(
+            "Optional: your budget",
+            min_value=0,
+            max_value=5000,
+            step=50,
+            key="budget",
+            label_visibility="collapsed",
+        )
 
         st.write("")
         predict_clicked = st.button("✨ Estimate price", use_container_width=True)
@@ -473,6 +505,7 @@ with tab_predict:
                 try:
                     ram_val = float(st.session_state.ram)
                     storage_val = float(st.session_state.storage)
+                    unlocked_yes = unlocked_to_bool(st.session_state.unlocked)
 
                     X = build_feature_row(
                         brand=st.session_state.brand,
@@ -480,7 +513,7 @@ with tab_predict:
                         ram_gb=ram_val,
                         storage_gb=storage_val,
                         color=st.session_state.color,
-                        unlocked_yes=(st.session_state.unlocked == "Yes"),
+                        unlocked_yes=unlocked_yes,
                         colmap=colmap,
                     )
                     pred = predict_price(model, X)
@@ -498,9 +531,7 @@ with tab_predict:
                     st.session_state.last_error = None
                 except Exception:
                     st.session_state.last_pred = None
-                    st.session_state.last_error = (
-                        "We couldn’t estimate the price right now. Please try again."
-                    )
+                    st.session_state.last_error = "We couldn’t estimate the price right now. Please try again."
 
         if st.session_state.last_error:
             st.error(st.session_state.last_error)
@@ -531,7 +562,7 @@ with tab_predict:
                 brand=st.session_state.last_input[0],
                 ram_gb=float(st.session_state.last_input[2]),
                 storage_gb=float(st.session_state.last_input[3]),
-                unlocked_yes=(st.session_state.last_input[5] == "Yes"),
+                unlocked_yes=unlocked_to_bool(st.session_state.last_input[5]),
             )
             if not similar.empty:
                 st.write("")
@@ -541,10 +572,17 @@ with tab_predict:
         st.markdown("</div>", unsafe_allow_html=True)
 
     st.write("")
-    with st.expander("ℹ️ About this estimator"):
-        st.write(
-            "This app uses a trained ML model saved in `final_price_model.joblib`. "
-            "All dropdown options are loaded from your dataset (`smartphones.csv`) where possible."
+    with st.expander("ℹ️ Dataset fields used (user-friendly description)"):
+        st.markdown(
+            """
+- **Brand:** Smartphone brand.  
+- **Model:** Smartphone brand model.  
+- **RAM (Random Access Memory):** The amount of memory available for multitasking.  
+- **Storage:** Capacity of the smartphone.  
+- **Color:** Color of the smartphone.  
+- **SIM Status (Free/Unlocked):** Whether the phone is attached to a cell company contract (telco-locked) or can use any SIM (unlocked).  
+- **Price:** The cost of the smartphone in the dataset currency (this is what the model learns from).  
+"""
         )
 
 # =========================
@@ -582,7 +620,7 @@ with tab_compare:
         if c_key not in st.session_state:
             st.session_state[c_key] = colors_all[0]
         if u_key not in st.session_state:
-            st.session_state[u_key] = "Yes"
+            st.session_state[u_key] = "Yes (Any SIM)"
 
         def _on_brand_change():
             st.session_state[m_key] = "(Select a model)"
@@ -593,12 +631,14 @@ with tab_compare:
             st.session_state[r_key] = None
             st.session_state[s_key] = None
 
+        field_label("Brand", "Smartphone brand.")
         st.selectbox(
-            f"{prefix} Brand",
+            "Brand",
             brands,
             index=brands.index(st.session_state[b_key]) if st.session_state[b_key] in brands else 0,
             key=b_key,
             on_change=_on_brand_change,
+            label_visibility="collapsed",
         )
 
         # model options filtered by brand
@@ -610,12 +650,14 @@ with tab_compare:
         else:
             mopts += (all_models or [])
 
+        field_label("Model", "Smartphone model name for the selected brand.")
         st.selectbox(
-            f"{prefix} Model",
+            "Model",
             mopts,
             index=mopts.index(st.session_state[m_key]) if st.session_state[m_key] in mopts else 0,
             key=m_key,
             on_change=_on_model_change,
+            label_visibility="collapsed",
         )
 
         filtered = filter_df_for_choices(df, colmap, st.session_state[b_key], st.session_state[m_key])
@@ -628,7 +670,9 @@ with tab_compare:
             r_index = 0
         else:
             r_index = ram_labels.index(str(st.session_state[r_key]))
-        st.selectbox(f"{prefix} RAM (GB)", ram_labels, index=r_index, key=r_key)
+
+        field_label("RAM (Random Access Memory)", "Amount of memory available for multitasking (in GB).")
+        st.selectbox("RAM (GB)", ram_labels, index=r_index, key=r_key, label_visibility="collapsed")
 
         storage_opts = unique_sorted_numeric(filtered, colmap["storage"])
         if not storage_opts:
@@ -638,16 +682,27 @@ with tab_compare:
             s_index = 0
         else:
             s_index = storage_labels.index(str(st.session_state[s_key]))
-        st.selectbox(f"{prefix} Storage (GB)", storage_labels, index=s_index, key=s_key)
+
+        field_label("Storage", "Phone storage capacity (in GB).")
+        st.selectbox("Storage (GB)", storage_labels, index=s_index, key=s_key, label_visibility="collapsed")
 
         color_opts = unique_sorted(filtered, colmap["color"])
         if not color_opts:
             color_opts = colors_all
         if st.session_state[c_key] not in color_opts:
             st.session_state[c_key] = color_opts[0]
-        st.selectbox(f"{prefix} Color", color_opts, index=color_opts.index(st.session_state[c_key]), key=c_key)
 
-        st.radio(f"{prefix} Unlocked?", ["Yes", "No"], horizontal=True, key=u_key)
+        field_label("Color", "Color of the smartphone.")
+        st.selectbox("Color", color_opts, index=color_opts.index(st.session_state[c_key]), key=c_key, label_visibility="collapsed")
+
+        field_label("SIM Status", "Whether the phone can use any SIM (unlocked) or is locked to a telco.")
+        st.radio(
+            "Works with any SIM card?",
+            ["Yes (Any SIM)", "No (Locked to a telco)"],
+            horizontal=True,
+            key=u_key,
+            label_visibility="collapsed",
+        )
 
         return {
             "brand": st.session_state[b_key],
@@ -688,11 +743,11 @@ with tab_compare:
             try:
                 XA = build_feature_row(
                     A["brand"], A["model"], float(A["ram"]), float(A["storage"]),
-                    A["color"], A["unlock"] == "Yes", colmap
+                    A["color"], unlocked_to_bool(A["unlock"]), colmap
                 )
                 XB = build_feature_row(
                     B["brand"], B["model"], float(B["ram"]), float(B["storage"]),
-                    B["color"], B["unlock"] == "Yes", colmap
+                    B["color"], unlocked_to_bool(B["unlock"]), colmap
                 )
 
                 pA = predict_price(model, XA)

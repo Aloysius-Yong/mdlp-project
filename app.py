@@ -17,7 +17,6 @@ APP_TAGLINE = "Estimate phone prices and get model-driven recommendations — si
 MODEL_PATH = "final_price_model.joblib"
 DATA_PATH = "smartphones.csv"
 
-# If your training used different column names, we try to infer them.
 POSSIBLE_PRICE_COLS = ["Final Price", "final_price", "price", "Price", "Final_Price", "finalPrice"]
 POSSIBLE_BRAND_COLS = ["Brand", "brand", "Make", "make"]
 POSSIBLE_MODEL_COLS = ["Model", "model", "Phone Model", "phone_model"]
@@ -49,7 +48,6 @@ def load_dataset(path: str) -> pd.DataFrame:
         return pd.DataFrame()
     df = pd.read_csv(path)
 
-    # Clean whitespace
     for col in df.columns:
         if df[col].dtype == "object":
             df[col] = df[col].astype(str).str.strip()
@@ -78,15 +76,10 @@ def format_currency(v: float) -> str:
 
 
 def field_label(title: str, desc: str):
-    # Labels styled like your screenshot: **Field:** description
     st.markdown(f"**{title}:** {desc}")
 
 
 def normalize_yes_no(v) -> str:
-    """
-    Convert dataset unlocked/free values to "Yes"/"No" strings where possible.
-    Accepts: Yes/No, True/False, 1/0, "free", "unlocked", etc.
-    """
     if v is None or (isinstance(v, float) and np.isnan(v)):
         return "No"
     s = str(v).strip().lower()
@@ -94,15 +87,12 @@ def normalize_yes_no(v) -> str:
         return "Yes"
     if s in ["no", "n", "false", "0", "locked"]:
         return "No"
-    # fallback: if it contains "yes" or "unlocked"
     if "unlocked" in s or "free" in s or "yes" in s:
         return "Yes"
     return "No"
 
 
 def unlocked_label_to_bool(val: str) -> bool:
-    # UI labels:
-    # "Yes (Any SIM)" means unlocked/free
     return str(val).lower().startswith("yes")
 
 
@@ -133,7 +123,6 @@ def build_feature_row(
 
     df_row = pd.DataFrame([row])
 
-    # engineered features expected by the model (based on your errors)
     ram_val = safe_float(ram_gb, np.nan)
     storage_val = safe_float(storage_gb, np.nan)
 
@@ -168,11 +157,6 @@ def unique_sorted_numeric(df: pd.DataFrame, col: Optional[str]) -> List[int]:
 
 
 def filter_df_for_choices(df: pd.DataFrame, colmap: Dict[str, str], brand: str, model: str) -> pd.DataFrame:
-    """
-    Filter rows by brand + model (when columns exist).
-    This ensures RAM/Storage/Color dropdown options come ONLY from dataset
-    and match the chosen brand/model.
-    """
     if df.empty:
         return df
 
@@ -250,12 +234,8 @@ def nice_phone_name(row: pd.Series, colmap: Dict[str, str]) -> str:
     return (m or b or "Phone")
 
 
-@st.cache_data(show_spinner=False)
+# ✅ FIX: DO NOT cache this (it takes the model object, which Streamlit can’t hash)
 def predict_for_rows(df_subset: pd.DataFrame, colmap: Dict[str, str], model_obj) -> pd.DataFrame:
-    """
-    Predict prices for many rows from your dataset.
-    This powers the Recommendations tab and keeps it model-linked.
-    """
     if df_subset.empty:
         return df_subset
 
@@ -267,28 +247,22 @@ def predict_for_rows(df_subset: pd.DataFrame, colmap: Dict[str, str], model_obj)
     ucol = colmap.get("unlocked")
     pcol = colmap.get("price")
 
-    # We only use rows that have required columns
     needed = [bcol, mcol, ccol, rcol, scol, ucol]
     if any(col is None for col in needed):
-        # If mapping fails, return empty to avoid confusing results
         return pd.DataFrame()
 
     work = df_subset.copy()
 
-    # Clean + coerce numeric
     work[rcol] = pd.to_numeric(work[rcol], errors="coerce")
     work[scol] = pd.to_numeric(work[scol], errors="coerce")
 
-    # Unlocked normalization
     work["_unlocked_norm"] = work[ucol].apply(normalize_yes_no)
     work["_free_bin"] = (work["_unlocked_norm"].str.lower() == "yes").astype(int)
 
     work = work.dropna(subset=[rcol, scol, bcol, mcol, ccol])
-
     if work.empty:
         return pd.DataFrame()
 
-    # Build model input using dataset column names + engineered features
     X = pd.DataFrame(
         {
             bcol: work[bcol].astype(str),
@@ -303,11 +277,9 @@ def predict_for_rows(df_subset: pd.DataFrame, colmap: Dict[str, str], model_obj)
     X["RAM_x_Storage"] = (work[rcol].astype(float) * work[scol].astype(float)).astype(float)
     X["Storage_per_RAM"] = (work[scol].astype(float) / work[rcol].replace(0, np.nan).astype(float)).astype(float)
 
-    # Predict
     preds = model_obj.predict(X)
     work["_predicted_price"] = preds.astype(float)
 
-    # Use dataset price if available
     if pcol and pcol in work.columns:
         work[pcol] = pd.to_numeric(work[pcol], errors="coerce")
         work["_value_gap"] = work["_predicted_price"] - work[pcol]
@@ -315,12 +287,6 @@ def predict_for_rows(df_subset: pd.DataFrame, colmap: Dict[str, str], model_obj)
         work["_value_gap"] = np.nan
 
     return work
-
-
-def clamp01(x: float) -> float:
-    if x is None or (isinstance(x, float) and np.isnan(x)):
-        return 0.0
-    return float(max(0.0, min(1.0, x)))
 
 
 # =========================
@@ -359,19 +325,12 @@ section[data-testid="stSidebar"] { display: none; }
 .muted { color: rgba(15,23,42,0.60); font-size: 0.95rem; }
 .small { font-size: 0.9rem; color: rgba(15,23,42,0.65); }
 
-/* clean spacing for label paragraphs */
 div[data-testid="stMarkdownContainer"] p { margin-bottom: 0.25rem; }
 
-/* buttons */
 div.stButton > button, div.stDownloadButton > button {
   border-radius: 12px !important;
   padding: 0.75rem 1rem !important;
   font-weight: 650 !important;
-}
-
-/* nicer expander header */
-div[data-testid="stExpander"] details summary p {
-  font-weight: 600 !important;
 }
 </style>
 """
@@ -393,9 +352,6 @@ colmap = {
     "unlocked": pick_first_existing(df, POSSIBLE_UNLOCKED_COLS) if not df.empty else None,
 }
 
-# =========================
-# Guardrails (no crashes)
-# =========================
 if model is None:
     st.error(f"Model file not found: `{MODEL_PATH}`. Make sure it is in the same folder as `app.py`.")
     st.stop()
@@ -406,13 +362,12 @@ if df.empty:
         f"Dropdown lists will use safe fallback options."
     )
 
-# Base dropdown options from dataset
 brands = unique_sorted(df, colmap["brand"]) or ["Apple", "Samsung", "Xiaomi", "Oppo", "Vivo"]
 colors_all = unique_sorted(df, colmap["color"]) or ["Black", "White", "Blue", "Red", "Green"]
 all_models = unique_sorted(df, colmap["model"]) if colmap["model"] else []
 
 # =========================
-# Session state (reactive resetting)
+# Session state
 # =========================
 if "brand" not in st.session_state:
     st.session_state.brand = brands[0]
@@ -434,7 +389,7 @@ if "last_pred" not in st.session_state:
     st.session_state.last_input = None
     st.session_state.last_error = None
 
-# Recommend tab state
+# Recommendations state
 if "rec_brand" not in st.session_state:
     st.session_state.rec_brand = "Any brand"
 if "rec_budget_min" not in st.session_state:
@@ -477,9 +432,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-tab_predict, tab_compare, tab_reco = st.tabs(
-    ["🔮 Estimate Price", "🆚 Compare Phones", "⭐ Recommendations"]
-)
+tab_predict, tab_compare, tab_reco = st.tabs(["🔮 Estimate Price", "🆚 Compare Phones", "⭐ Recommendations"])
 
 # =========================
 # TAB 1: Estimate Price
@@ -490,13 +443,9 @@ with tab_predict:
     with left:
         st.markdown('<div class="card">', unsafe_allow_html=True)
         st.markdown("## Enter phone details")
-        st.markdown(
-            '<div class="muted">All options come from your dataset. The prediction comes from your trained model.</div>',
-            unsafe_allow_html=True,
-        )
+        st.markdown('<div class="muted">All options come from your dataset. The prediction comes from your trained model.</div>', unsafe_allow_html=True)
         st.write("")
 
-        # Brand
         field_label("Brand", "Choose the smartphone brand.")
         st.selectbox(
             "Brand",
@@ -507,7 +456,6 @@ with tab_predict:
             label_visibility="collapsed",
         )
 
-        # Models filtered by brand
         model_options = ["(Select a model)"]
         if not df.empty and colmap["brand"] and colmap["model"]:
             subset = df[df[colmap["brand"]].astype(str).str.strip() == str(st.session_state.brand).strip()]
@@ -528,43 +476,27 @@ with tab_predict:
 
         filtered = filter_df_for_choices(df, colmap, st.session_state.brand, st.session_state.model)
 
-        # RAM dropdown only from dataset
-        ram_options = unique_sorted_numeric(filtered, colmap["ram"])
-        if not ram_options:
-            ram_options = unique_sorted_numeric(df, colmap["ram"]) or [2, 4, 6, 8, 12, 16]
+        ram_options = unique_sorted_numeric(filtered, colmap["ram"]) or unique_sorted_numeric(df, colmap["ram"]) or [2, 4, 6, 8, 12, 16]
         ram_labels = [str(r) for r in ram_options]
-        if st.session_state.ram is None or str(st.session_state.ram) not in ram_labels:
-            ram_index = 0
-        else:
-            ram_index = ram_labels.index(str(st.session_state.ram))
+        ram_index = 0 if (st.session_state.ram is None or str(st.session_state.ram) not in ram_labels) else ram_labels.index(str(st.session_state.ram))
 
         field_label("RAM (Memory)", "More RAM helps multitasking (GB).")
         st.selectbox("RAM", ram_labels, index=ram_index, key="ram", label_visibility="collapsed")
 
-        # Storage dropdown only from dataset
-        storage_options = unique_sorted_numeric(filtered, colmap["storage"])
-        if not storage_options:
-            storage_options = unique_sorted_numeric(df, colmap["storage"]) or [32, 64, 128, 256, 512]
+        storage_options = unique_sorted_numeric(filtered, colmap["storage"]) or unique_sorted_numeric(df, colmap["storage"]) or [32, 64, 128, 256, 512]
         storage_labels = [str(s) for s in storage_options]
-        if st.session_state.storage is None or str(st.session_state.storage) not in storage_labels:
-            storage_index = 0
-        else:
-            storage_index = storage_labels.index(str(st.session_state.storage))
+        storage_index = 0 if (st.session_state.storage is None or str(st.session_state.storage) not in storage_labels) else storage_labels.index(str(st.session_state.storage))
 
         field_label("Storage", "How much space you have for apps and photos (GB).")
         st.selectbox("Storage", storage_labels, index=storage_index, key="storage", label_visibility="collapsed")
 
-        # Color dropdown only from dataset
-        color_options = unique_sorted(filtered, colmap["color"])
-        if not color_options:
-            color_options = colors_all
+        color_options = unique_sorted(filtered, colmap["color"]) or colors_all
         if st.session_state.color not in color_options:
             st.session_state.color = color_options[0]
 
         field_label("Color", "Choose the phone color.")
         st.selectbox("Color", color_options, index=color_options.index(st.session_state.color), key="color", label_visibility="collapsed")
 
-        # SIM status (user-friendly replacement for "Unlocked?")
         field_label("SIM Status", "Does it work with any SIM card, or is it locked to a telco?")
         st.radio(
             "Works with any SIM card?",
@@ -576,18 +508,10 @@ with tab_predict:
 
         st.write("")
         field_label("Budget", "Optional: set your max budget to see if the estimate fits.")
-        st.slider(
-            "Budget",
-            min_value=0,
-            max_value=5000,
-            step=50,
-            key="budget",
-            label_visibility="collapsed",
-        )
+        st.slider("Budget", min_value=0, max_value=5000, step=50, key="budget", label_visibility="collapsed")
 
         st.write("")
         predict_clicked = st.button("✨ Estimate price", use_container_width=True)
-
         st.markdown("</div>", unsafe_allow_html=True)
 
     with right:
@@ -645,10 +569,7 @@ with tab_predict:
 
         pred = st.session_state.last_pred
         if pred is None:
-            st.markdown(
-                '<div class="small">Choose specs and click <b>Estimate price</b> to see the result.</div>',
-                unsafe_allow_html=True,
-            )
+            st.markdown('<div class="small">Choose specs and click <b>Estimate price</b> to see the result.</div>', unsafe_allow_html=True)
         else:
             st.metric("Estimated price", format_currency(pred))
 
@@ -678,36 +599,18 @@ with tab_predict:
 
         st.markdown("</div>", unsafe_allow_html=True)
 
-    st.write("")
-    with st.expander("Dataset fields used (simple explanation)"):
-        st.markdown(
-            """
-- **Brand:** Smartphone brand.  
-- **Model:** Model name under the chosen brand.  
-- **RAM (Memory):** Helps multitasking.  
-- **Storage:** Space for apps/photos.  
-- **Color:** Phone color.  
-- **SIM Status:** Works with any SIM (unlocked) or locked to a telco.  
-- **Price:** The dataset price the model learned from.  
-"""
-        )
-
 # =========================
 # TAB 2: Compare Phones
 # =========================
 with tab_compare:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown("## Compare two phones")
-    st.markdown(
-        '<div class="muted">Pick two sets of specs (from the dataset) — compare predicted prices.</div>',
-        unsafe_allow_html=True,
-    )
+    st.markdown('<div class="muted">Pick two sets of specs (from the dataset) — compare predicted prices.</div>', unsafe_allow_html=True)
     st.write("")
 
     colA, colB = st.columns(2, gap="large")
 
     def phone_form(prefix: str, default_brand_idx: int = 0) -> Dict[str, object]:
-        # state keys
         b_key = f"{prefix}_brand"
         m_key = f"{prefix}_model"
         r_key = f"{prefix}_ram"
@@ -715,7 +618,6 @@ with tab_compare:
         c_key = f"{prefix}_color"
         u_key = f"{prefix}_sim"
 
-        # init defaults
         if b_key not in st.session_state:
             st.session_state[b_key] = brands[min(default_brand_idx, len(brands) - 1)]
         if m_key not in st.session_state:
@@ -739,16 +641,10 @@ with tab_compare:
             st.session_state[s_key] = None
 
         field_label("Brand", "Choose the smartphone brand.")
-        st.selectbox(
-            "Brand",
-            brands,
-            index=brands.index(st.session_state[b_key]) if st.session_state[b_key] in brands else 0,
-            key=b_key,
-            on_change=_on_brand_change,
-            label_visibility="collapsed",
-        )
+        st.selectbox("Brand", brands,
+                     index=brands.index(st.session_state[b_key]) if st.session_state[b_key] in brands else 0,
+                     key=b_key, on_change=_on_brand_change, label_visibility="collapsed")
 
-        # model options filtered by brand
         mopts = ["(Select a model)"]
         if not df.empty and colmap["brand"] and colmap["model"]:
             subset = df[df[colmap["brand"]].astype(str).str.strip() == str(st.session_state[b_key]).strip()]
@@ -758,36 +654,27 @@ with tab_compare:
             mopts += (all_models or [])
 
         field_label("Model", "Choose the model for the selected brand.")
-        st.selectbox(
-            "Model",
-            mopts,
-            index=mopts.index(st.session_state[m_key]) if st.session_state[m_key] in mopts else 0,
-            key=m_key,
-            on_change=_on_model_change,
-            label_visibility="collapsed",
-        )
+        st.selectbox("Model", mopts,
+                     index=mopts.index(st.session_state[m_key]) if st.session_state[m_key] in mopts else 0,
+                     key=m_key, on_change=_on_model_change, label_visibility="collapsed")
 
-        filtered = filter_df_for_choices(df, colmap, st.session_state[b_key], st.session_state[m_key])
+        filtered_local = filter_df_for_choices(df, colmap, st.session_state[b_key], st.session_state[m_key])
 
-        ram_opts = unique_sorted_numeric(filtered, colmap["ram"])
-        if not ram_opts:
-            ram_opts = unique_sorted_numeric(df, colmap["ram"]) or [2, 4, 6, 8, 12, 16]
+        ram_opts = unique_sorted_numeric(filtered_local, colmap["ram"]) or unique_sorted_numeric(df, colmap["ram"]) or [2, 4, 6, 8, 12, 16]
         ram_labels = [str(v) for v in ram_opts]
         r_index = 0 if (st.session_state[r_key] is None or str(st.session_state[r_key]) not in ram_labels) else ram_labels.index(str(st.session_state[r_key]))
 
         field_label("RAM (Memory)", "More RAM helps multitasking (GB).")
         st.selectbox("RAM", ram_labels, index=r_index, key=r_key, label_visibility="collapsed")
 
-        storage_opts = unique_sorted_numeric(filtered, colmap["storage"])
-        if not storage_opts:
-            storage_opts = unique_sorted_numeric(df, colmap["storage"]) or [32, 64, 128, 256, 512]
+        storage_opts = unique_sorted_numeric(filtered_local, colmap["storage"]) or unique_sorted_numeric(df, colmap["storage"]) or [32, 64, 128, 256, 512]
         storage_labels = [str(v) for v in storage_opts]
         s_index = 0 if (st.session_state[s_key] is None or str(st.session_state[s_key]) not in storage_labels) else storage_labels.index(str(st.session_state[s_key]))
 
         field_label("Storage", "Space for apps/photos (GB).")
         st.selectbox("Storage", storage_labels, index=s_index, key=s_key, label_visibility="collapsed")
 
-        color_opts = unique_sorted(filtered, colmap["color"]) or colors_all
+        color_opts = unique_sorted(filtered_local, colmap["color"]) or colors_all
         if st.session_state[c_key] not in color_opts:
             st.session_state[c_key] = color_opts[0]
 
@@ -795,13 +682,8 @@ with tab_compare:
         st.selectbox("Color", color_opts, index=color_opts.index(st.session_state[c_key]), key=c_key, label_visibility="collapsed")
 
         field_label("SIM Status", "Works with any SIM (unlocked) or locked to a telco.")
-        st.radio(
-            "Works with any SIM card?",
-            ["Yes (Any SIM)", "No (Locked to a telco)"],
-            horizontal=True,
-            key=u_key,
-            label_visibility="collapsed",
-        )
+        st.radio("Works with any SIM card?", ["Yes (Any SIM)", "No (Locked to a telco)"],
+                 horizontal=True, key=u_key, label_visibility="collapsed")
 
         return {
             "brand": st.session_state[b_key],
@@ -840,14 +722,8 @@ with tab_compare:
             st.error(f"{'Phone A: ' + errA if errA else ''} {'Phone B: ' + errB if errB else ''}".strip())
         else:
             try:
-                XA = build_feature_row(
-                    A["brand"], A["model"], float(A["ram"]), float(A["storage"]),
-                    A["color"], unlocked_label_to_bool(A["sim"]), colmap
-                )
-                XB = build_feature_row(
-                    B["brand"], B["model"], float(B["ram"]), float(B["storage"]),
-                    B["color"], unlocked_label_to_bool(B["sim"]), colmap
-                )
+                XA = build_feature_row(A["brand"], A["model"], float(A["ram"]), float(A["storage"]), A["color"], unlocked_label_to_bool(A["sim"]), colmap)
+                XB = build_feature_row(B["brand"], B["model"], float(B["ram"]), float(B["storage"]), B["color"], unlocked_label_to_bool(B["sim"]), colmap)
 
                 pA = predict_price(model, XA)
                 pB = predict_price(model, XB)
@@ -863,25 +739,20 @@ with tab_compare:
                     st.success("Phone B is estimated to be cheaper.")
                 else:
                     st.info("Both phones have the same estimated price.")
-
             except Exception:
                 st.error("We couldn’t compare these phones right now. Please try again.")
 
     st.markdown("</div>", unsafe_allow_html=True)
 
 # =========================
-# TAB 3: Recommendations (MODEL-LINKED)
+# TAB 3: Recommendations
 # =========================
 with tab_reco:
     st.markdown('<div class="card">', unsafe_allow_html=True)
     st.markdown("## Recommended phones for you")
-    st.markdown(
-        '<div class="muted">This list is generated by running your trained model across phones in your dataset, then ranking results.</div>',
-        unsafe_allow_html=True,
-    )
+    st.markdown('<div class="muted">This list is generated by running your trained model across phones in your dataset, then ranking results.</div>', unsafe_allow_html=True)
     st.write("")
 
-    # Budget bounds from dataset price column (if available), else safe defaults
     pcol = colmap.get("price")
     if not df.empty and pcol and pcol in df.columns:
         pvals = pd.to_numeric(df[pcol], errors="coerce").dropna()
@@ -890,28 +761,15 @@ with tab_reco:
     else:
         ds_min, ds_max = 0, 5000
 
-    # Filters row
     f1, f2, f3 = st.columns([1.0, 1.0, 1.0], gap="large")
 
     with f1:
         field_label("Brand preference", "Choose a brand, or keep it open.")
         brand_choices = ["Any brand"] + brands
-        st.selectbox(
-            "Brand preference",
-            brand_choices,
-            index=brand_choices.index(st.session_state.rec_brand) if st.session_state.rec_brand in brand_choices else 0,
-            key="rec_brand",
-            label_visibility="collapsed",
-        )
+        st.selectbox("Brand preference", brand_choices, key="rec_brand", label_visibility="collapsed")
 
         field_label("SIM preference", "Do you need it to work with any SIM?")
-        st.selectbox(
-            "SIM preference",
-            ["Any", "Yes (Any SIM)", "No (Locked to a telco)"],
-            index=["Any", "Yes (Any SIM)", "No (Locked to a telco)"].index(st.session_state.rec_sim) if st.session_state.rec_sim in ["Any", "Yes (Any SIM)", "No (Locked to a telco)"] else 0,
-            key="rec_sim",
-            label_visibility="collapsed",
-        )
+        st.selectbox("SIM preference", ["Any", "Yes (Any SIM)", "No (Locked to a telco)"], key="rec_sim", label_visibility="collapsed")
 
     with f2:
         field_label("Budget range", "Show phones whose model-predicted price falls within your budget.")
@@ -919,55 +777,32 @@ with tab_reco:
             "Budget range",
             min_value=int(ds_min),
             max_value=int(max(ds_max, ds_min + 100)),
-            value=(int(max(ds_min, st.session_state.rec_budget_min)), int(min(ds_max, st.session_state.rec_budget_max))),
+            value=(int(st.session_state.rec_budget_min), int(st.session_state.rec_budget_max)),
             step=50,
             label_visibility="collapsed",
         )
         st.session_state.rec_budget_min = bmin
         st.session_state.rec_budget_max = bmax
 
-        # Minimum RAM / Storage options derived from dataset
         ram_all = unique_sorted_numeric(df, colmap["ram"]) or [2, 4, 6, 8, 12, 16]
         sto_all = unique_sorted_numeric(df, colmap["storage"]) or [32, 64, 128, 256, 512]
 
         field_label("Minimum RAM", "Filter out phones below this RAM (optional).")
-        ram_choices = ["Any"] + [str(v) for v in ram_all]
-        st.selectbox(
-            "Minimum RAM",
-            ram_choices,
-            index=ram_choices.index(st.session_state.rec_min_ram) if st.session_state.rec_min_ram in ram_choices else 0,
-            key="rec_min_ram",
-            label_visibility="collapsed",
-        )
+        st.selectbox("Minimum RAM", ["Any"] + [str(v) for v in ram_all], key="rec_min_ram", label_visibility="collapsed")
 
         field_label("Minimum Storage", "Filter out phones below this storage (optional).")
-        sto_choices = ["Any"] + [str(v) for v in sto_all]
-        st.selectbox(
-            "Minimum Storage",
-            sto_choices,
-            index=sto_choices.index(st.session_state.rec_min_storage) if st.session_state.rec_min_storage in sto_choices else 0,
-            key="rec_min_storage",
-            label_visibility="collapsed",
-        )
+        st.selectbox("Minimum Storage", ["Any"] + [str(v) for v in sto_all], key="rec_min_storage", label_visibility="collapsed")
 
     with f3:
         field_label("Ranking style", "How should we order the results?")
         st.selectbox(
             "Ranking style",
             ["Best overall", "Cheapest (predicted)", "Highest value (best deal)", "Most storage", "Most RAM"],
-            index=["Best overall", "Cheapest (predicted)", "Highest value (best deal)", "Most storage", "Most RAM"].index(st.session_state.rec_sort) if st.session_state.rec_sort in ["Best overall", "Cheapest (predicted)", "Highest value (best deal)", "Most storage", "Most RAM"] else 0,
             key="rec_sort",
             label_visibility="collapsed",
-        )
-
+    )
         field_label("Number of results", "How many phones to show.")
-        st.selectbox(
-            "Number of results",
-            [5, 10, 15, 20],
-            index=[5, 10, 15, 20].index(st.session_state.rec_top_n) if st.session_state.rec_top_n in [5, 10, 15, 20] else 1,
-            key="rec_top_n",
-            label_visibility="collapsed",
-        )
+        st.selectbox("Number of results", [5, 10, 15, 20], key="rec_top_n", label_visibility="collapsed")
 
         st.write("")
         run_reco = st.button("⭐ Get recommendations", use_container_width=True)
@@ -975,28 +810,23 @@ with tab_reco:
     st.write("")
 
     if run_reco:
-        # Basic validity checks
         missing_cols = [k for k in ["brand", "model", "color", "ram", "storage", "unlocked"] if colmap.get(k) is None]
         if df.empty or missing_cols:
             st.error(
-                "Recommendations are unavailable because the dataset columns could not be detected. "
-                "Please ensure smartphones.csv contains Brand, Model, RAM, Storage, Color, and Unlocked/Free."
+                "Recommendations are unavailable because required dataset columns could not be detected. "
+                "Please ensure your CSV includes Brand, Model, RAM, Storage, Color, and Unlocked/Free."
             )
         else:
-            # Start from dataset
             work = df.copy()
 
-            # Apply filters first (fast)
             bcol = colmap["brand"]
             rcol = colmap["ram"]
             scol = colmap["storage"]
             ucol = colmap["unlocked"]
 
-            # Brand filter
             if st.session_state.rec_brand != "Any brand":
                 work = work[work[bcol].astype(str).str.strip() == str(st.session_state.rec_brand).strip()]
 
-            # Min RAM / Storage filter
             min_ram = None if st.session_state.rec_min_ram == "Any" else safe_float(st.session_state.rec_min_ram, np.nan)
             min_sto = None if st.session_state.rec_min_storage == "Any" else safe_float(st.session_state.rec_min_storage, np.nan)
 
@@ -1008,13 +838,11 @@ with tab_reco:
             if min_sto is not None and not np.isnan(min_sto):
                 work = work[work[scol] >= float(min_sto)]
 
-            # SIM preference filter
             if st.session_state.rec_sim != "Any":
                 want_yes = unlocked_label_to_bool(st.session_state.rec_sim)
                 want = "Yes" if want_yes else "No"
                 work = work[work[ucol].apply(normalize_yes_no).str.lower() == want.lower()]
 
-            # Keep it reasonable to avoid slow predictions
             work = work.dropna(subset=[bcol, colmap["model"], colmap["color"], rcol, scol, ucol]).copy()
             if len(work) > 4000:
                 work = work.sample(4000, random_state=42)
@@ -1025,7 +853,6 @@ with tab_reco:
             if scored.empty or "_predicted_price" not in scored.columns:
                 st.error("Could not generate recommendations with the current dataset/model. Please check your dataset columns.")
             else:
-                # Budget filter on MODEL prediction (this is what makes it model-linked)
                 scored = scored[
                     (scored["_predicted_price"] >= float(st.session_state.rec_budget_min))
                     & (scored["_predicted_price"] <= float(st.session_state.rec_budget_max))
@@ -1034,10 +861,9 @@ with tab_reco:
                 if scored.empty:
                     st.warning("No phones matched your filters. Try widening your budget or reducing minimum RAM/Storage.")
                 else:
-                    # Build a clean display frame
                     name = scored.apply(lambda r: nice_phone_name(r, colmap), axis=1)
-                    ram = scored[colmap["ram"]].astype(float)
-                    sto = scored[colmap["storage"]].astype(float)
+                    ram = pd.to_numeric(scored[colmap["ram"]], errors="coerce")
+                    sto = pd.to_numeric(scored[colmap["storage"]], errors="coerce")
                     sim = scored[colmap["unlocked"]].apply(normalize_yes_no)
                     col = scored[colmap["color"]].astype(str)
 
@@ -1045,40 +871,18 @@ with tab_reco:
                         {
                             "Phone": name,
                             "Predicted price": scored["_predicted_price"].astype(float),
-                            "RAM (GB)": ram.astype(int, errors="ignore"),
-                            "Storage (GB)": sto.astype(int, errors="ignore"),
+                            "RAM (GB)": ram,
+                            "Storage (GB)": sto,
                             "Color": col,
                             "Works with any SIM": sim.map(lambda x: "Yes" if str(x).lower() == "yes" else "No"),
                         }
                     )
 
-                    # Value gap (if dataset price exists)
                     if colmap.get("price") and colmap["price"] in scored.columns:
                         actual = pd.to_numeric(scored[colmap["price"]], errors="coerce")
                         display["Dataset price"] = actual
                         display["Deal score"] = (scored["_value_gap"]).astype(float)
 
-                    # Overall score (model-linked + user-friendly)
-                    # specs_score: RAM+Storage normalized
-                    ram_minv, ram_maxv = float(ram.min()), float(ram.max())
-                    sto_minv, sto_maxv = float(sto.min()), float(sto.max())
-                    ram_norm = (ram - ram_minv) / (ram_maxv - ram_minv + 1e-9)
-                    sto_norm = (sto - sto_minv) / (sto_maxv - sto_minv + 1e-9)
-                    specs_score = 0.5 * ram_norm + 0.5 * sto_norm
-
-                    # value_score: normalized value gap (only if available)
-                    if "Deal score" in display.columns:
-                        vg = display["Deal score"].replace([np.inf, -np.inf], np.nan)
-                        vg = vg.fillna(vg.median() if not vg.dropna().empty else 0.0)
-                        vg_min, vg_max = float(vg.min()), float(vg.max())
-                        value_score = (vg - vg_min) / (vg_max - vg_min + 1e-9)
-                    else:
-                        value_score = pd.Series([0.5] * len(display), index=display.index)
-
-                    overall = 0.55 * value_score + 0.45 * specs_score
-                    display["Overall score"] = (overall * 100).round(0).astype(int)
-
-                    # Sorting
                     sort_mode = st.session_state.rec_sort
                     if sort_mode == "Cheapest (predicted)":
                         display = display.sort_values("Predicted price", ascending=True)
@@ -1089,20 +893,15 @@ with tab_reco:
                     elif sort_mode == "Most RAM":
                         display = display.sort_values("RAM (GB)", ascending=False)
                     else:
-                        display = display.sort_values(["Overall score", "Predicted price"], ascending=[False, True])
+                        if "Deal score" in display.columns:
+                            display = display.sort_values(["Deal score", "Predicted price"], ascending=[False, True])
+                        else:
+                            display = display.sort_values(["Predicted price"], ascending=[True])
 
-                    # Limit results
                     display = display.head(int(st.session_state.rec_top_n)).reset_index(drop=True)
-
-                    # Show summary metrics
-                    m1, m2, m3 = st.columns(3)
-                    m1.metric("Matches found", str(len(display)))
-                    m2.metric("Budget range", f"{format_currency(st.session_state.rec_budget_min)} – {format_currency(st.session_state.rec_budget_max)}")
-                    m3.metric("Top pick score", f"{int(display.loc[0, 'Overall score'])}/100" if len(display) else "—")
 
                     st.write("")
                     st.markdown("### Your recommended phones")
-
                     st.dataframe(
                         display,
                         use_container_width=True,
@@ -1114,13 +913,11 @@ with tab_reco:
                         },
                     )
 
-                    # User-friendly explanation (ties everything to the model)
                     st.info(
                         "These recommendations are generated by running your trained model on phones in your dataset. "
-                        "The budget filter and ranking use the model’s predicted price."
+                        "The budget filter uses the model’s predicted price."
                     )
 
-                    # Download
                     csv = display.to_csv(index=False).encode("utf-8")
                     st.download_button(
                         "Download recommendations (CSV)",
@@ -1134,6 +931,6 @@ with tab_reco:
 
 st.write("")
 st.caption(
-    "Built with Streamlit • Predictions and recommendations are generated ML model (`final_price_model.joblib`) • "
-    "All dropdown options come from dataset (`smartphones.csv`)."
+    "Built with Streamlit • Predictions and recommendations are generated by your ML model (`final_price_model.joblib`) • "
+    "All dropdown options come from your dataset (`smartphones.csv`)."
 )
